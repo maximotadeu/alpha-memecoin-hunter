@@ -1,0 +1,12 @@
+services:
+  - type: worker  # Usar worker em vez de web
+    name: alpha-hunter-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python alpha_bot.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        fromSecret: true
+      - key: CHAT_ID
+        fromSecret: true
