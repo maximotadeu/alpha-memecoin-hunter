@@ -10,3 +10,11 @@ services:
         fromSecret: true
       - key: CHAT_ID
         fromSecret: true
+      - key: REDDIT_CLIENT_ID
+      fromSecret: true
+      - key: REDDIT_CLIENT_SECRET  
+      fromSecret: true
+      - key: REDDIT_USERNAME
+      fromSecret: true
+      - key: REDDIT_PASSWORD
+      fromSecret: true
