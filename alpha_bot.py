@@ -23,6 +23,10 @@ PORT = int(os.environ.get("PORT", 10000))
 app = Flask(__name__)
 
 # Health check endpoint para Render
+@app.route('/')
+def home():
+    return Response("🤖 Alpha Hunter Bot is running!", status=200)
+
 @app.route('/health')
 def health_check():
     return Response("🤖 Alpha Hunter Bot is healthy!", status=200)
