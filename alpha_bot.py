@@ -6,8 +6,8 @@ import random
 import re
 import aiohttp
 import asyncio
-from datetime import datetime
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+import base64
 
 # Configurar logging
 logging.basicConfig(
@@ -15,46 +15,163 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Configurações
+# Configurações Reddit API
+REDDIT_CLIENT_ID = os.environ.get('REDDIT_CLIENT_ID')
+REDDIT_CLIENT_SECRET = os.environ.get('REDDIT_CLIENT_SECRET')
+REDDIT_USERNAME = os.environ.get('REDDIT_USERNAME')
+REDDIT_PASSWORD = os.environ.get('REDDIT_PASSWORD')
+
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# Fontes de ALPHA com URLs específicas
-SOURCES = {
-    "reddit": {
-        "enabled": True,
-        "subreddits": [
-            "CryptoMoonShots", "CryptoCurrency", "CryptoMars",
-            "CryptoGems", "Crypto_General", "CryptoMoon"
-        ],
-        "keywords": [
-            "presale", "launching", "new project", "meme token",
-            "fair launch", "low cap", "hidden gem", "stealth launch",
-            "ido", "initial offering", "token sale", "going live"
-        ]
-    },
-    "launchpads": {
-        "enabled": True,
-        "sites": {
-            "pinksale": {
-                "url": "https://www.pinksale.finance/launchpad",
-                "name": "PinkSale"
-            },
-            "dxsale": {
-                "url": "https://www.dxsale.network/presales", 
-                "name": "DxSale"
-            },
-            "unicrypt": {
-                "url": "https://www.unicrypt.network/presales",
-                "name": "Unicrypt"
-            }
+class RedditAPI:
+    def __init__(self):
+        self.access_token = None
+        self.token_expiry = None
+        self.session = aiohttp.ClientSession()
+    
+    async def get_access_token(self):
+        """Obtém access token da API do Reddit"""
+        if self.access_token and self.token_expiry and datetime.now() < self.token_expiry:
+            return self.access_token
+        
+        auth = base64.b64encode(f"{REDDIT_CLIENT_ID}:{REDDIT_CLIENT_SECRET}".encode()).decode()
+        
+        headers = {
+            'User-Agent': 'AlphaHunterBot/1.0 by YourUsername',
+            'Authorization': f'Basic {auth}'
         }
-    }
-}
+        
+        data = {
+            'grant_type': 'password',
+            'username': REDDIT_USERNAME,
+            'password': REDDIT_PASSWORD
+        }
+        
+        try:
+            async with self.session.post(
+                'https://www.reddit.com/api/v1/access_token',
+                headers=headers,
+                data=data,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    self.access_token = result['access_token']
+                    self.token_expiry = datetime.now() + timedelta(seconds=result['expires_in'] - 60)
+                    logging.info("✅ Reddit API token obtido com sucesso!")
+                    return self.access_token
+                else:
+                    logging.error(f"❌ Erro ao obter token: {response.status}")
+                    return None
+        except Exception as e:
+            logging.error(f"❌ Exception getting token: {e}")
+            return None
+    
+    async def search_posts(self, subreddit, query, limit=25, sort='new'):
+        """Busca posts usando API oficial"""
+        token = await self.get_access_token()
+        if not token:
+            return []
+        
+        headers = {
+            'User-Agent': 'AlphaHunterBot/1.0',
+            'Authorization': f'Bearer {token}'
+        }
+        
+        url = f'https://oauth.reddit.com/r/{subreddit}/search'
+        params = {
+            'q': query,
+            'sort': sort,
+            'limit': limit,
+            'restrict_sr': 'on',
+            't': 'day'
+        }
+        
+        try:
+            async with self.session.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=15
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return self.parse_posts(data)
+                else:
+                    logging.error(f"❌ Search error: {response.status}")
+                    return []
+        except Exception as e:
+            logging.error(f"❌ Search exception: {e}")
+            return []
+    
+    async def get_new_posts(self, subreddit, limit=25):
+        """Pega posts novos usando API oficial"""
+        token = await self.get_access_token()
+        if not token:
+            return []
+        
+        headers = {
+            'User-Agent': 'AlphaHunterBot/1.0',
+            'Authorization': f'Bearer {token}'
+        }
+        
+        url = f'https://oauth.reddit.com/r/{subreddit}/new'
+        params = {'limit': limit}
+        
+        try:
+            async with self.session.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=15
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return self.parse_posts(data)
+                else:
+                    logging.error(f"❌ New posts error: {response.status}")
+                    return []
+        except Exception as e:
+            logging.error(f"❌ New posts exception: {e}")
+            return []
+    
+    def parse_posts(self, data):
+        """Parseia os posts da API response"""
+        posts = []
+        
+        if 'data' in data and 'children' in data['data']:
+            for child in data['data']['children']:
+                post_data = child['data']
+                
+                posts.append({
+                    'title': post_data.get('title', ''),
+                    'selftext': post_data.get('selftext', ''),
+                    'url': f"https://reddit.com{post_data.get('permalink', '')}",
+                    'created_utc': post_data.get('created_utc', 0),
+                    'score': post_data.get('score', 0),
+                    'num_comments': post_data.get('num_comments', 0),
+                    'upvote_ratio': post_data.get('upvote_ratio', 0),
+                    'author': post_data.get('author', ''),
+                    'subreddit': post_data.get('subreddit', '')
+                })
+        
+        return posts
+    
+    async def close(self):
+        await self.session.close()
 
 class AlphaHunterBot:
     def __init__(self):
+        self.reddit_api = RedditAPI()
         self.vistos = set()
+        self.keywords = [
+            "presale", "launch", "new token", "meme coin",
+            "fair launch", "stealth launch", "ido", 
+            "initial offering", "token sale", "going live",
+            "airdrop", "whitelist", "early access", "gem",
+            "moonshot", "100x", "low cap", "hidden gem"
+        ]
     
     def send_telegram(self, message):
         """Envia mensagem para Telegram"""
@@ -75,253 +192,161 @@ class AlphaHunterBot:
         except Exception as e:
             logging.error(f"Erro Telegram: {e}")
             return False
-
-    async def monitor_reddit(self):
-        """Monitora Reddit para novos posts com mais detalhes"""
+    
+    async def monitor_reddit_api(self):
+        """Monitora Reddit usando API oficial"""
         posts = []
-        try:
-            for subreddit in SOURCES["reddit"]["subreddits"]:
-                url = f"https://www.reddit.com/r/{subreddit}/new.json?limit=10"
-                headers = {"User-Agent": "Mozilla/5.0 (Alpha Hunter Bot)"}
+        subreddits = ["CryptoMoonShots", "CryptoCurrency", "CryptoMars", "CryptoGems"]
+        
+        for subreddit in subreddits:
+            try:
+                # Buscar posts novos
+                new_posts = await self.reddit_api.get_new_posts(subreddit, limit=15)
                 
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, headers=headers, timeout=15) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            for post in data.get("data", {}).get("children", []):
-                                post_data = post.get("data", {})
-                                title = post_data.get("title", "").lower()
-                                content = post_data.get("selftext", "").lower()
-                                
-                                # Verificar keywords com scoring
-                                text = f"{title} {content}"
-                                keyword_matches = []
-                                
-                                for keyword in SOURCES["reddit"]["keywords"]:
-                                    if keyword in text:
-                                        keyword_matches.append(keyword)
-                                
-                                if keyword_matches:
-                                    posts.append({
-                                        "title": post_data.get("title"),
-                                        "url": f"https://reddit.com{post_data.get('permalink')}",
-                                        "created": post_data.get("created_utc"),
-                                        "subreddit": subreddit,
-                                        "keywords": keyword_matches,
-                                        "score": len(keyword_matches)
-                                    })
-                                    
-                                    logging.info(f"📝 Reddit encontrado: {post_data.get('title')[:50]}...")
-        except Exception as e:
-            logging.error(f"Reddit monitor error: {e}")
-        
-        return posts
-
-    async def monitor_launchpads(self):
-        """Monitora sites de launchpad com parsing específico"""
-        launches = []
-        try:
-            for platform, config in SOURCES["launchpads"]["sites"].items():
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(config["url"], timeout=20) as response:
-                            if response.status == 200:
-                                html = await response.text()
-                                soup = BeautifulSoup(html, 'html.parser')
-                                
-                                # Título da página
-                                page_title = soup.title.string if soup.title else "No title"
-                                
-                                # Procurar por textos específicos
-                                launch_texts = []
-                                
-                                # Diferentes estratégias por platform
-                                if platform == "pinksale":
-                                    # PinkSale específico
-                                    elements = soup.find_all(string=re.compile(r'live|ongoing|upcoming|presale', re.IGNORECASE))
-                                    for element in elements:
-                                        if len(element.strip()) > 20:  # Textos significativos
-                                            launch_texts.append(element.strip())
-                                
-                                elif platform == "dxsale":
-                                    # DxSale específico
-                                    elements = soup.find_all(string=re.compile(r'active|live|presale', re.IGNORECASE))
-                                    for element in elements:
-                                        if len(element.strip()) > 15:
-                                            launch_texts.append(element.strip())
-                                
-                                else:
-                                    # Unicrypt e outros
-                                    elements = soup.find_all(string=re.compile(r'presale|launch', re.IGNORECASE))
-                                    for element in elements:
-                                        if len(element.strip()) > 10:
-                                            launch_texts.append(element.strip())
-                                
-                                if launch_texts:
-                                    launches.append({
-                                        "platform": config["name"],
-                                        "url": config["url"],
-                                        "title": page_title,
-                                        "activity": launch_texts[:3],  # Primeiros 3 textos
-                                        "found_at": datetime.now().isoformat()
-                                    })
-                                    
-                                    logging.info(f"🏗️ {config['name']} activity detected")
-                                
-                except Exception as e:
-                    logging.error(f"Error checking {platform}: {e}")
-                    continue
+                # Buscar por keywords
+                for keyword in self.keywords:
+                    keyword_posts = await self.reddit_api.search_posts(subreddit, keyword, limit=10)
+                    new_posts.extend(keyword_posts)
+                
+                for post in new_posts:
+                    text = f"{post['title']} {post['selftext']}".lower()
                     
-        except Exception as e:
-            logging.error(f"Launchpad monitor error: {e}")
+                    # Verificar se contém keywords importantes
+                    found_keywords = []
+                    for keyword in self.keywords:
+                        if keyword in text:
+                            found_keywords.append(keyword)
+                    
+                    if found_keywords:
+                        posts.append({
+                            **post,
+                            'keywords': found_keywords,
+                            'relevance_score': len(found_keywords) + (post['score'] / 100)
+                        })
+                        
+                        logging.info(f"📝 API Found: {post['title'][:50]}...")
+                
+            except Exception as e:
+                logging.error(f"❌ Error monitoring {subreddit}: {e}")
+                continue
         
-        return launches
-
+        # Ordenar por relevância
+        posts.sort(key=lambda x: x['relevance_score'], reverse=True)
+        return posts[:20]  # Top 20 posts
+    
+    def analyze_reddit_posts(self, posts):
+        """Analisa posts do Reddit para oportunidades"""
+        opportunities = []
+        token_mentions = {}
+        
+        for post in posts:
+            # Detectar padrões de presale
+            text = f"{post['title']} {post['selftext']}".lower()
+            
+            if self.detect_presale_patterns(text):
+                opportunities.append({
+                    'type': 'PRESALE_ALERT',
+                    'title': post['title'],
+                    'url': post['url'],
+                    'subreddit': post['subreddit'],
+                    'keywords': post['keywords'],
+                    'score': post['score'],
+                    'comments': post['num_comments'],
+                    'confidence': 'HIGH'
+                })
+            
+            # Analisar menções de tokens
+            tokens = self.extract_tokens(text)
+            for token in tokens:
+                token_mentions[token] = token_mentions.get(token, 0) + 1
+        
+        # Adicionar tokens trending
+        for token, count in token_mentions.items():
+            if count >= 3:  # Mencionado pelo menos 3 vezes
+                opportunities.append({
+                    'type': 'TRENDING_TOKEN',
+                    'token': token,
+                    'mentions': count,
+                    'source': 'reddit',
+                    'confidence': 'MEDIUM'
+                })
+        
+        return opportunities
+    
     def detect_presale_patterns(self, text):
-        """Detecta padrões de presale em textos"""
+        """Detecta padrões de presale"""
         patterns = [
-            r"presale.*(live|ongoing|active)",
-            r"launch.*(tomorrow|today|soon)", 
-            r"fair.*launch",
-            r"stealth.*launch",
-            r"token.*sale.*start",
-            r"ido.*(start|begin)",
-            r"initial.*offering",
-            r"going.*live.*[0-9]",
-            r"whitelist.*open"
+            r'presale.*(live|start|begin)',
+            r'launch.*(tomorrow|today|tonight)',
+            r'fair.*launch',
+            r'stealth.*launch',
+            r'token.*sale',
+            r'ido.*(starting|live)',
+            r'going.*live.*[0-9]',
+            r'whitelist.*(open|starting)'
         ]
         
         for pattern in patterns:
-            if re.search(pattern, text.lower()):
+            if re.search(pattern, text, re.IGNORECASE):
                 return True
         return False
-
-    def analyze_trends(self, posts):
-        """Analisa tendências nos posts"""
-        trends = {}
+    
+    def extract_tokens(self, text):
+        """Extrai tokens mencionados"""
+        # Padrões para tokens
+        patterns = [
+            r'\$([A-Z]{3,6})\b',  # $TOKEN
+            r'\b([A-Z]{3,6})\b.*(token|coin|launch)',
+            r'(buy|get|trade).*\b([A-Z]{3,6})\b'
+        ]
         
-        for post in posts:
-            text = f"{post.get('title', '')}".lower()
-            
-            # Padrões para detectar tokens
-            patterns = [
-                r'\$([A-Z]{3,6})\b',  # $TOKEN
-                r'\b([A-Z]{3,6})\b.*(launch|presale|token|coin)',
-                r'(buy|get|trade).*\b([A-Z]{3,6})\b',
-                r'\b([A-Z]{3,6}).*(airdrop|whitelist|reward)'
-            ]
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, text.upper())
-                for match in matches:
-                    token = match[0] if isinstance(match, tuple) else match
-                    # Filtrar palavras comuns
-                    common_words = ["ETH", "BTC", "BNB", "USDT", "USDC", "USD", "THE", "AND", "FOR", "YOU", "ARE"]
-                    if token not in common_words and len(token) >= 3:
-                        trends[token] = trends.get(token, 0) + 1
+        tokens = set()
+        for pattern in patterns:
+            matches = re.findall(pattern, text.upper())
+            for match in matches:
+                token = match[0] if isinstance(match, tuple) else match
+                if token not in ["ETH", "BTC", "BNB", "USDT", "USDC", "USD"]:
+                    tokens.add(token)
         
-        return trends
-
+        return list(tokens)
+    
     def create_alpha_message(self, opportunity):
-        """Cria mensagem de alpha detalhada"""
-        if opportunity["type"] == "PRESALE_ALERT":
-            message = f"🚀 <b>PRESALE ALERT - REDDIT</b>\n\n"
+        """Cria mensagem detalhada"""
+        if opportunity['type'] == 'PRESALE_ALERT':
+            message = f"🚀 <b>PRESALE ALERT - REDDIT API</b>\n\n"
             message += f"📢 <b>{opportunity['title']}</b>\n"
             message += f"🌐 <b>Subreddit:</b> r/{opportunity['subreddit']}\n"
+            message += f"⭐ <b>Score:</b> {opportunity['score']} ↑\n"
+            message += f"💬 <b>Comments:</b> {opportunity['comments']}\n"
             message += f"🔍 <b>Keywords:</b> {', '.join(opportunity['keywords'][:3])}\n"
             message += f"🔗 <a href='{opportunity['url']}'>Ver post</a>\n\n"
-            message += "🎯 <b>OPORTUNIDADE DE ALPHA!</b>\n"
-            message += "⚠️ <i>Pesquise antes de investir!</i>"
+            message += "🎯 <b>OPORTUNIDADE DE ALPHA REAL-TIME!</b>"
             
-        elif opportunity["type"] == "TRENDING_TOKEN":
-            message = f"📈 <b>TRENDING TOKEN - REDDIT</b>\n\n"
+        elif opportunity['type'] == 'TRENDING_TOKEN':
+            message = f"📈 <b>TRENDING TOKEN - REDDIT API</b>\n\n"
             message += f"🏷 <b>Token:</b> {opportunity['token']}\n"
             message += f"🔊 <b>Mentions:</b> {opportunity['mentions']}\n"
-            message += f"🌐 <b>Fonte:</b> r/{opportunity['source']}\n\n"
-            message += "📢 <b>Está sendo muito comentado!</b>\n"
-            message += "🔍 <i>Verifique se já listou!</i>"
-            
-        elif opportunity["type"] == "LAUNCHPAD_ACTIVITY":
-            message = f"🏗️ <b>LAUNCHPAD ACTIVITY</b>\n\n"
-            message += f"🌐 <b>Platform:</b> {opportunity['platform']}\n"
-            message += f"📝 <b>Detectado:</b> {opportunity['title']}\n"
-            
-            if opportunity.get('activity'):
-                message += f"🔍 <b>Atividade:</b>\n"
-                for activity in opportunity['activity'][:2]:
-                    message += f"• {activity[:50]}...\n"
-            
-            message += f"🔗 <a href='{opportunity['url']}'>Acessar launchpad</a>\n\n"
-            message += "🚀 <b>Possível novo lançamento!</b>"
+            message += f"🌐 <b>Source:</b> Multiple subreddits\n\n"
+            message += "📢 <b>Estou sendo muito mencionado!</b>\n"
+            message += "🔍 <i>Possível lançamento em breve!</i>"
         
         message += f"\n\n⏰ <i>{datetime.now().strftime('%d/%m %H:%M:%S')}</i>"
         return message
-
-    async def find_alpha_opportunities(self):
-        """Encontra oportunidades de alpha"""
-        opportunities = []
-        
-        try:
-            # Monitorar fontes
-            reddit_posts = await self.monitor_reddit()
-            launchpad_launches = await self.monitor_launchpads()
-            
-            logging.info(f"📊 Reddit: {len(reddit_posts)} posts relevantes")
-            logging.info(f"🏗️ Launchpads: {len(launchpad_launches)} atividades")
-            
-            # Analisar posts do Reddit
-            for post in reddit_posts:
-                if self.detect_presale_patterns(post["title"]):
-                    opportunities.append({
-                        "type": "PRESALE_ALERT",
-                        "source": "reddit",
-                        "title": post["title"],
-                        "url": post["url"],
-                        "subreddit": post["subreddit"],
-                        "keywords": post["keywords"],
-                        "confidence": "HIGH"
-                    })
-            
-            # Analisar tendências do Reddit
-            reddit_trends = self.analyze_trends(reddit_posts)
-            for token, count in reddit_trends.items():
-                if count >= 2:  # Mencionado pelo menos 2 vezes
-                    opportunities.append({
-                        "type": "TRENDING_TOKEN",
-                        "token": token,
-                        "mentions": count,
-                        "source": "reddit",
-                        "confidence": "MEDIUM"
-                    })
-            
-            # Adicionar launchpads
-            for launch in launchpad_launches:
-                opportunities.append({
-                    "type": "LAUNCHPAD_ACTIVITY",
-                    "platform": launch["platform"],
-                    "url": launch["url"],
-                    "title": launch["title"],
-                    "activity": launch.get("activity", []),
-                    "source": "launchpad",
-                    "confidence": "HIGH"
-                })
-                
-        except Exception as e:
-            logging.error(f"Alpha finding error: {e}")
-        
-        return opportunities
-
+    
     async def run(self):
-        """Loop principal do bot"""
-        logging.info("🤖 Alpha Hunter Bot iniciado!")
+        """Loop principal com API oficial"""
+        logging.info("🤖 Alpha Hunter Bot com API Reddit iniciado!")
         
-        self.send_telegram("🚀 <b>Alpha Hunter iniciado!</b>\n🔍 Monitorando presales e tendências\n🎯 Antecipando pumps de 1000%+")
+        self.send_telegram("🚀 <b>Alpha Hunter com API Reddit iniciado!</b>\n🔍 Monitoramento em tempo real\n🎯 Dados estruturados e confiáveis")
         
         while True:
             try:
-                opportunities = await self.find_alpha_opportunities()
+                # Usar API oficial
+                posts = await self.monitor_reddit_api()
+                opportunities = self.analyze_reddit_posts(posts)
                 
-                logging.info(f"🎯 Total de oportunidades: {len(opportunities)}")
+                logging.info(f"📊 Posts analisados: {len(posts)}")
+                logging.info(f"🎯 Oportunidades encontradas: {len(opportunities)}")
                 
                 for opp in opportunities:
                     opp_id = f"{opp['type']}_{opp.get('token', '')}_{opp.get('url', '')}"
@@ -332,32 +357,40 @@ class AlphaHunterBot:
                         message = self.create_alpha_message(opp)
                         if self.send_telegram(message):
                             logging.info(f"✅ Alpha enviado: {opp['type']}")
-                            if opp['type'] == 'TRENDING_TOKEN':
-                                logging.info(f"   Token: {opp.get('token')}")
-                            else:
-                                logging.info(f"   Detalhes: {opp.get('title', 'N/A')[:30]}...")
                 
-                # Esperar tempo aleatório
-                wait_time = random.randint(180, 300)  # 3-5 minutos
+                # Esperar 2-3 minutos
+                wait_time = random.randint(120, 180)
                 logging.info(f"⏳ Próxima verificação em {wait_time//60} minutos...")
                 await asyncio.sleep(wait_time)
                 
             except Exception as e:
-                logging.error(f"Erro no Alpha Hunter: {e}")
+                logging.error(f"❌ Erro no loop principal: {e}")
                 await asyncio.sleep(60)
+    
+    async def close(self):
+        await self.reddit_api.close()
 
 # Função principal
 async def main():
     """Função principal"""
+    # Verificar credenciais
+    required_vars = ['REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'REDDIT_USERNAME', 'REDDIT_PASSWORD']
+    missing_vars = [var for var in required_vars if not os.environ.get(var)]
+    
+    if missing_vars:
+        logging.error(f"❌ Variáveis missing: {missing_vars}")
+        logging.error("💡 Configure no Render: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD")
+        return
+    
     if not TELEGRAM_TOKEN or not CHAT_ID:
         logging.error("❌ Configure TELEGRAM_TOKEN e CHAT_ID!")
         return
     
-    logging.info("🚀 Iniciando Alpha Hunter Bot...")
-    
-    # Iniciar bot
-    alpha_bot = AlphaHunterBot()
-    await alpha_bot.run()
+    bot = AlphaHunterBot()
+    try:
+        await bot.run()
+    finally:
+        await bot.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
