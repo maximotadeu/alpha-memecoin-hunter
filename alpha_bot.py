@@ -36,7 +36,7 @@ class RedditAPI:
         self.access_token = None
         self.token_expiry = None
         self.session = aiohttp.ClientSession()
-        self.banned_subreddits = set()  # Track banned subreddits
+        self.banned_subreddits = set()
     
     async def get_access_token(self):
         """Obtém access token da API do Reddit"""
@@ -71,16 +71,15 @@ class RedditAPI:
                     return self.access_token
                 else:
                     error_text = await response.text()
-                    logger.error(f"❌ Erro ao obter token: {response.status} - {error_text}")
+                    logger.error(f"❌ Erro ao obter token: {response.status}")
                     return None
         except Exception as e:
             logger.error(f"❌ Exception getting token: {e}")
             return None
     
-    async def search_posts(self, subreddit, query, limit=25, sort='new'):
-        """Busca posts usando API oficial - CORRIGIDO"""
+    async def search_posts(self, subreddit, query, limit=20):
+        """Busca posts usando API oficial"""
         if subreddit in self.banned_subreddits:
-            logger.warning(f"⚠️  Pulando subreddit banado: r/{subreddit}")
             return []
             
         token = await self.get_access_token()
@@ -92,12 +91,11 @@ class RedditAPI:
             'Authorization': f'Bearer {token}'
         }
         
-        # Usar search mais genérico para evitar bans
         url = f'https://oauth.reddit.com/search'
         params = {
             'q': f'subreddit:{subreddit} {query}',
-            'sort': sort,
-            'limit': min(limit, 20),  # Limitar para evitar detection
+            'sort': 'new',
+            'limit': min(limit, 15),
             't': 'day',
             'type': 'link'
         }
@@ -113,21 +111,18 @@ class RedditAPI:
                     data = await response.json()
                     return self.parse_posts(data)
                 elif response.status == 404:
-                    logger.warning(f"⚠️  Subreddit r/{subreddit} possivelmente banado ou privado")
+                    logger.warning(f"⚠️  Subreddit r/{subreddit} banado/privado")
                     self.banned_subreddits.add(subreddit)
                     return []
                 else:
-                    error_text = await response.text()
-                    logger.error(f"❌ Search error em r/{subreddit}: {response.status}")
                     return []
         except Exception as e:
-            logger.error(f"❌ Search exception em r/{subreddit}: {e}")
+            logger.error(f"❌ Search exception: {e}")
             return []
     
-    async def get_new_posts(self, subreddit, limit=25):
-        """Pega posts novos usando API oficial - CORRIGIDO"""
+    async def get_new_posts(self, subreddit, limit=20):
+        """Pega posts novos usando API oficial"""
         if subreddit in self.banned_subreddits:
-            logger.warning(f"⚠️  Pulando subreddit banado: r/{subreddit}")
             return []
             
         token = await self.get_access_token()
@@ -139,9 +134,8 @@ class RedditAPI:
             'Authorization': f'Bearer {token}'
         }
         
-        # URL mais segura para evitar bans
         url = f'https://oauth.reddit.com/r/{subreddit}/new'
-        params = {'limit': min(limit, 15)}  # Limitar para evitar detection
+        params = {'limit': min(limit, 15)}
         
         try:
             async with self.session.get(
@@ -154,15 +148,13 @@ class RedditAPI:
                     data = await response.json()
                     return self.parse_posts(data)
                 elif response.status == 404:
-                    logger.warning(f"⚠️  Subreddit r/{subreddit} possivelmente banado ou privado")
+                    logger.warning(f"⚠️  Subreddit r/{subreddit} banado/privado")
                     self.banned_subreddits.add(subreddit)
                     return []
                 else:
-                    error_text = await response.text()
-                    logger.error(f"❌ New posts error em r/{subreddit}: {response.status}")
                     return []
         except Exception as e:
-            logger.error(f"❌ New posts exception em r/{subreddit}: {e}")
+            logger.error(f"❌ New posts exception: {e}")
             return []
     
     def parse_posts(self, data):
@@ -173,7 +165,6 @@ class RedditAPI:
             for child in data['data']['children']:
                 post_data = child['data']
                 
-                # Verificar se é um post válido
                 if not post_data.get('stickied') and not post_data.get('over_18'):
                     posts.append({
                         'title': post_data.get('title', ''),
@@ -198,70 +189,92 @@ class TwitterAPI:
     def __init__(self):
         self.session = aiohttp.ClientSession()
         self.last_request_time = 0
-        self.request_count = 0
+        self.rate_limit_remaining = 450  # Twitter free tier limit
         self.rate_limit_reset = 0
+        self.request_count = 0
     
     async def search_tweets(self, query, limit=10):
-        """Busca tweets usando API v2 do Twitter - CORRIGIDO"""
+        """Busca tweets usando API v2 do Twitter - SOLUÇÃO COMPLETA"""
         if not TWITTER_BEARER_TOKEN:
             return []
         
-        # Respeitar rate limiting
         current_time = time.time()
-        if current_time < self.last_request_time + 2:  # 2 segundos entre requests
-            await asyncio.sleep(2)
         
-        if self.request_count >= 10 and current_time < self.rate_limit_reset:
-            wait_time = self.rate_limit_reset - current_time
-            logger.warning(f"⚠️  Rate limit Twitter, aguardando {wait_time:.1f}s")
-            await asyncio.sleep(wait_time)
-            self.request_count = 0
+        # Gerenciamento avançado de rate limiting
+        if self.rate_limit_remaining <= 5:
+            if current_time < self.rate_limit_reset:
+                wait_time = self.rate_limit_reset - current_time
+                logger.warning(f"🐦 Rate limit Twitter - Aguardando {wait_time:.0f}s")
+                await asyncio.sleep(wait_time)
+                self.rate_limit_remaining = 450
+            else:
+                self.rate_limit_remaining = 450
+        
+        # Espera estratégica entre requests
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < 2.5:
+            await asyncio.sleep(2.5 - time_since_last)
         
         headers = {
             'Authorization': f'Bearer {TWITTER_BEARER_TOKEN}'
         }
         
+        # Query otimizada para crypto
+        optimized_query = f'({query}) (crypto OR cryptocurrency OR blockchain OR defi OR nft) -is:retweet lang:en'
+        
         url = 'https://api.twitter.com/2/tweets/search/recent'
         params = {
-            'query': f'{query} -is:retweet lang:en',
-            'max_results': max(10, min(limit, 50)),  # Entre 10-50 conforme API
-            'tweet.fields': 'created_at,public_metrics,author_id',
+            'query': optimized_query,
+            'max_results': min(limit, 50),
+            'tweet.fields': 'created_at,public_metrics,author_id,context_annotations',
             'expansions': 'author_id',
-            'user.fields': 'username,name'
+            'user.fields': 'username,name,verified',
+            'media.fields': 'url'
         }
         
         try:
+            start_time = time.time()
             async with self.session.get(
                 url,
                 headers=headers,
                 params=params,
-                timeout=15
+                timeout=20
             ) as response:
                 self.last_request_time = time.time()
                 self.request_count += 1
                 
+                # Atualizar métricas de rate limit
+                if 'x-rate-limit-remaining' in response.headers:
+                    self.rate_limit_remaining = int(response.headers['x-rate-limit-remaining'])
+                if 'x-rate-limit-reset' in response.headers:
+                    self.rate_limit_reset = int(response.headers['x-rate-limit-reset'])
+                
+                response_time = time.time() - start_time
+                
                 if response.status == 200:
                     data = await response.json()
-                    
-                    # Atualizar info de rate limit
-                    if 'x-rate-limit-remaining' in response.headers:
-                        remaining = int(response.headers['x-rate-limit-remaining'])
-                        if remaining <= 2:
-                            reset_time = int(response.headers['x-rate-limit-reset'])
-                            self.rate_limit_reset = reset_time
-                    
-                    return self.parse_tweets(data)
+                    tweets = self.parse_tweets(data)
+                    logger.info(f"🐦 Twitter: {len(tweets)} tweets em {response_time:.2f}s")
+                    return tweets
+                
                 elif response.status == 429:
-                    reset_time = int(response.headers.get('x-rate-limit-reset', time.time() + 900))
-                    self.rate_limit_reset = reset_time
-                    logger.warning("⚠️  Rate limit do Twitter atingido")
+                    logger.warning("🐦 Rate limit Twitter - Aguardando próximo ciclo")
                     return []
+                
+                elif response.status == 400:
+                    error_data = await response.json()
+                    logger.warning(f"🐦 Twitter query error: {error_data.get('detail', 'Unknown')}")
+                    return []
+                
                 else:
-                    error_text = await response.text()
-                    logger.error(f"❌ Twitter search error: {response.status}")
+                    logger.warning(f"🐦 Twitter error {response.status}")
                     return []
+                    
+        except asyncio.TimeoutError:
+            logger.warning("🐦 Twitter timeout - pulando busca")
+            return []
         except Exception as e:
-            logger.error(f"❌ Twitter search exception: {e}")
+            logger.error(f"🐦 Twitter exception: {e}")
             return []
     
     def parse_tweets(self, data):
@@ -278,15 +291,21 @@ class TwitterAPI:
                 author_id = tweet_data.get('author_id')
                 author_info = users.get(author_id, {})
                 
+                # Filtrar tweets com baixo engajamento
+                metrics = tweet_data.get('public_metrics', {})
+                if metrics.get('like_count', 0) + metrics.get('retweet_count', 0) < 3:
+                    continue
+                
                 tweets.append({
                     'text': tweet_data.get('text', ''),
                     'url': f"https://twitter.com/{author_info.get('username', '')}/status/{tweet_data.get('id', '')}",
                     'created_at': tweet_data.get('created_at', ''),
-                    'likes': tweet_data.get('public_metrics', {}).get('like_count', 0),
-                    'retweets': tweet_data.get('public_metrics', {}).get('retweet_count', 0),
-                    'replies': tweet_data.get('public_metrics', {}).get('reply_count', 0),
+                    'likes': metrics.get('like_count', 0),
+                    'retweets': metrics.get('retweet_count', 0),
+                    'replies': metrics.get('reply_count', 0),
                     'author': author_info.get('username', ''),
                     'author_name': author_info.get('name', ''),
+                    'verified': author_info.get('verified', False),
                     'id': tweet_data.get('id', ''),
                     'source': 'twitter'
                 })
@@ -306,13 +325,16 @@ class AlphaHunterBot:
             "fair launch", "stealth launch", "ido", 
             "initial offering", "token sale", "going live",
             "airdrop", "whitelist", "early access", "gem",
-            "moonshot", "100x", "low cap", "hidden gem"
+            "moonshot", "100x", "low cap", "hidden gem",
+            "#presale", "#launch", "#airdrop", "#ido"
         ]
         self.safe_subreddits = [
             "CryptoCurrency", "CryptoMarkets", "defi",
             "ethereum", "binance", "Crypto_General",
-            "NFT", "BlockchainStartups", "CryptoTechnology"
+            "NFT", "BlockchainStartups", "CryptoTechnology",
+            "altcoin", "cryptomooncalls"
         ]
+        self.twitter_cycle = 0
     
     def send_telegram(self, message):
         """Envia mensagem para Telegram"""
@@ -335,19 +357,19 @@ class AlphaHunterBot:
             return False
     
     async def monitor_reddit(self):
-        """Monitora Reddit usando API oficial - CORRIGIDO"""
+        """Monitora Reddit usando API oficial"""
         posts = []
         
         for subreddit in self.safe_subreddits:
             try:
-                # Buscar posts novos com limite conservador
-                new_posts = await self.reddit_api.get_new_posts(subreddit, limit=8)
+                # Buscar posts novos
+                new_posts = await self.reddit_api.get_new_posts(subreddit, limit=10)
                 
-                # Buscar por keywords com limite conservador
-                for keyword in self.keywords[:5]:  # Apenas 5 keywords para evitar spam
-                    keyword_posts = await self.reddit_api.search_posts(subreddit, keyword, limit=5)
+                # Buscar por keywords específicas
+                for keyword in random.sample(self.keywords, min(4, len(self.keywords))):
+                    keyword_posts = await self.reddit_api.search_posts(subreddit, keyword, limit=6)
                     new_posts.extend(keyword_posts)
-                    await asyncio.sleep(1)  # Pausa entre searches
+                    await asyncio.sleep(0.5)
                 
                 for post in new_posts:
                     post_id = f"reddit_{post.get('id', '')}"
@@ -358,46 +380,51 @@ class AlphaHunterBot:
                     
                     text = f"{post['title']} {post['selftext']}".lower()
                     
-                    # Verificar se contém keywords importantes
+                    # Verificar keywords
                     found_keywords = []
                     for keyword in self.keywords:
                         if keyword.lower() in text:
                             found_keywords.append(keyword)
                     
-                    if found_keywords:
+                    if found_keywords and post['score'] >= 2:
                         posts.append({
                             **post,
                             'keywords': found_keywords,
-                            'relevance_score': len(found_keywords) + (post['score'] / 100) + (post['num_comments'] / 10)
+                            'relevance_score': len(found_keywords) + (post['score'] / 50) + (post['num_comments'] / 20)
                         })
                         
-                        logger.info(f"📝 Reddit Found: {post['title'][:50]}...")
+                        logger.info(f"📝 Reddit: {post['title'][:60]}...")
                 
-                await asyncio.sleep(2)  # Pausa entre subreddits
+                await asyncio.sleep(1.5)
                 
             except Exception as e:
-                logger.error(f"❌ Error monitoring Reddit {subreddit}: {e}")
+                logger.error(f"❌ Error monitoring Reddit: {e}")
                 continue
         
         return posts
     
     async def monitor_twitter(self):
-        """Monitora Twitter para oportunidades - CORRIGIDO"""
+        """Monitora Twitter para oportunidades"""
         tweets = []
         
         if not TWITTER_BEARER_TOKEN:
             return tweets
         
+        # Buscar no Twitter a cada 2 ciclos para reduzir rate limiting
+        self.twitter_cycle += 1
+        if self.twitter_cycle % 2 != 0:
+            return tweets
+        
         try:
-            # Agrupar keywords para reduzir requests
-            grouped_keywords = [
-                "presale OR launch OR token",
-                "airdrop OR whitelist OR ido",
-                "gem OR moonshot OR 100x"
+            # Grupos de keywords otimizados
+            keyword_groups = [
+                "presale OR launch OR token OR airdrop",
+                "whitelist OR ido OR gem OR moonshot",
+                "fair launch OR stealth launch OR new token"
             ]
             
-            for query in grouped_keywords:
-                found_tweets = await self.twitter_api.search_tweets(query, limit=15)
+            for query in keyword_groups:
+                found_tweets = await self.twitter_api.search_tweets(query, limit=12)
                 
                 for tweet in found_tweets:
                     tweet_id = f"twitter_{tweet.get('id', '')}"
@@ -408,22 +435,21 @@ class AlphaHunterBot:
                     
                     text = tweet['text'].lower()
                     
-                    # Verificar se contém keywords importantes
                     found_keywords = []
                     for kw in self.keywords:
                         if kw.lower() in text:
                             found_keywords.append(kw)
                     
-                    if found_keywords and tweet['likes'] >= 5:  # Mínimo de engajamento
+                    if found_keywords and tweet['likes'] >= 5:
                         tweets.append({
                             **tweet,
                             'keywords': found_keywords,
                             'relevance_score': len(found_keywords) + (tweet['likes'] / 100) + (tweet['retweets'] / 50)
                         })
                         
-                        logger.info(f"🐦 Twitter Found: {tweet['text'][:50]}...")
+                        logger.info(f"🐦 Twitter: {tweet['text'][:60]}...")
                 
-                await asyncio.sleep(5)  # Pausa maior entre requests Twitter
+                await asyncio.sleep(3)
             
         except Exception as e:
             logger.error(f"❌ Error monitoring Twitter: {e}")
@@ -431,17 +457,27 @@ class AlphaHunterBot:
         return tweets
     
     async def monitor_sources(self):
-        """Monitora todas as fontes (Reddit + Twitter)"""
+        """Monitora todas as fontes"""
         try:
             reddit_posts, twitter_tweets = await asyncio.gather(
                 self.monitor_reddit(),
-                self.monitor_twitter()
+                self.monitor_twitter(),
+                return_exceptions=True
             )
+            
+            # Handle exceptions
+            if isinstance(reddit_posts, Exception):
+                logger.error(f"Reddit monitoring failed: {reddit_posts}")
+                reddit_posts = []
+            if isinstance(twitter_tweets, Exception):
+                logger.error(f"Twitter monitoring failed: {twitter_tweets}")
+                twitter_tweets = []
             
             all_content = reddit_posts + twitter_tweets
             all_content.sort(key=lambda x: x['relevance_score'], reverse=True)
             
-            return all_content[:25]  # Top 25 conteúdos
+            logger.info(f"📊 Reddit: {len(reddit_posts)}, Twitter: {len(twitter_tweets)}")
+            return all_content[:25]
             
         except Exception as e:
             logger.error(f"❌ Error in monitor_sources: {e}")
@@ -495,15 +531,16 @@ class AlphaHunterBot:
     def detect_presale_patterns(self, text):
         """Detecta padrões de presale"""
         patterns = [
-            r'presale.*(live|start|begin|active)',
-            r'launch.*(tomorrow|today|tonight|soon)',
+            r'presale.*(live|start|begin|active|now)',
+            r'launch.*(tomorrow|today|tonight|soon|live)',
             r'fair.*launch',
             r'stealth.*launch',
             r'token.*sale',
-            r'ido.*(starting|live|open)',
+            r'ido.*(starting|live|open|register)',
             r'going.*live.*[0-9]',
-            r'whitelist.*(open|starting|join)',
-            r'airdrop.*(claim|live|participate)'
+            r'whitelist.*(open|starting|join|register)',
+            r'airdrop.*(claim|live|participate|join)',
+            r'early.*access.*(open|available)'
         ]
         
         for pattern in patterns:
@@ -528,7 +565,8 @@ class AlphaHunterBot:
                 else:
                     token = match
                 
-                if token and len(token) >= 2 and token not in ["ETH", "BTC", "BNB", "USDT", "USDC", "USD", "THE", "AND", "FOR"]:
+                if (token and len(token) >= 2 and 
+                    token not in ["ETH", "BTC", "BNB", "USDT", "USDC", "USD", "THE", "AND", "FOR", "YOU"]):
                     tokens.add(token)
         
         return list(tokens)
@@ -536,12 +574,13 @@ class AlphaHunterBot:
     def create_alpha_message(self, opportunity):
         """Cria mensagem detalhada"""
         if opportunity['type'] == 'PRESALE_ALERT':
-            source_emoji = "📱" if opportunity['source'] == 'twitter' else "🌐"
+            source_emoji = "🐦" if opportunity['source'] == 'twitter' else "🌐"
             message = f"🚀 <b>PRESALE ALERT - {opportunity['source'].upper()}</b>\n\n"
             message += f"{source_emoji} <b>{opportunity['title']}</b>\n"
             message += f"🔗 <a href='{opportunity['url']}'>Ver conteúdo</a>\n"
             message += f"⭐ <b>Engajamento:</b> {opportunity['score']} ↑\n"
-            message += f"💬 <b>Interações:</b> {opportunity['comments']}\n"
+            if opportunity['source'] == 'reddit':
+                message += f"💬 <b>Comentários:</b> {opportunity['comments']}\n"
             message += f"🔍 <b>Keywords:</b> {', '.join(opportunity['keywords'][:3])}\n\n"
             message += "🎯 <b>OPORTUNIDADE DE ALPHA REAL-TIME!</b>"
             
@@ -564,7 +603,6 @@ class AlphaHunterBot:
         
         while True:
             try:
-                # Monitorar todas as fontes
                 content = await self.monitor_sources()
                 opportunities = self.analyze_content(content)
                 
@@ -582,8 +620,12 @@ class AlphaHunterBot:
                             logger.info(f"✅ Alpha enviado: {opp['type']} from {opp.get('source', 'unknown')}")
                         await asyncio.sleep(1)
                 
-                # Esperar 3-4 minutos (aumentado para evitar rate limiting)
-                wait_time = random.randint(180, 240)
+                # Intervalo adaptativo baseado no número de oportunidades
+                base_wait = 180  # 3 minutos
+                if opportunities:
+                    base_wait = max(120, base_wait - len(opportunities) * 15)
+                
+                wait_time = random.randint(base_wait, base_wait + 60)
                 logger.info(f"⏳ Próxima verificação em {wait_time//60} minutos...")
                 await asyncio.sleep(wait_time)
                 
@@ -604,14 +646,12 @@ async def main():
     
     if missing_vars:
         logger.error(f"❌ Variáveis missing: {missing_vars}")
-        logger.error("💡 Configure no Render: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD")
     
     if not TELEGRAM_TOKEN or not CHAT_ID:
         logger.error("❌ Configure TELEGRAM_TOKEN e CHAT_ID!")
     
-    # Twitter é opcional mas recomendado
     if not TWITTER_BEARER_TOKEN:
-        logger.warning("⚠️  TWITTER_BEARER_TOKEN não configurado - monitoramento do Twitter desativado")
+        logger.warning("⚠️  TWITTER_BEARER_TOKEN não configurado")
     
     bot = AlphaHunterBot()
     try:
