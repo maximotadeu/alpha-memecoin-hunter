@@ -9,6 +9,7 @@ import asyncio
 from datetime import datetime, timedelta
 import base64
 import json
+from flask import Flask, Response
 
 # Configurar logging
 logging.basicConfig(
@@ -16,6 +17,15 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Configurações para Render
+PORT = int(os.environ.get("PORT", 10000))
+app = Flask(__name__)
+
+# Health check endpoint para Render
+@app.route('/health')
+def health_check():
+    return Response("🤖 Alpha Hunter Bot is healthy!", status=200)
 
 # Configurações Reddit API
 REDDIT_CLIENT_ID = os.environ.get('REDDIT_CLIENT_ID')
@@ -189,31 +199,46 @@ class TwitterAPI:
     def __init__(self):
         self.session = aiohttp.ClientSession()
         self.last_request_time = 0
-        self.rate_limit_remaining = 450  # Twitter free tier limit
+        self.rate_limit_remaining = 450
         self.rate_limit_reset = 0
         self.request_count = 0
+        self.rate_limit_wait_time = 0
+    
+    async def handle_rate_limit(self):
+        """Gerencia rate limit do Twitter de forma mais robusta"""
+        current_time = time.time()
+        
+        # Se estamos em período de espera por rate limit
+        if self.rate_limit_wait_time > current_time:
+            wait_remaining = self.rate_limit_wait_time - current_time
+            logger.warning(f"🐦 Rate limit Twitter - Aguardando {wait_remaining:.0f}s")
+            await asyncio.sleep(wait_remaining)
+            self.rate_limit_remaining = 450
+            self.rate_limit_wait_time = 0
+            return True
+        
+        # Verificar se estamos perto do limite
+        if self.rate_limit_remaining <= 10:
+            logger.warning(f"🐦 Rate limit baixo: {self.rate_limit_remaining} requests restantes")
+            # Esperar estratégicamente antes de fazer mais requests
+            await asyncio.sleep(30)
+            return True
+        
+        # Espera mínima entre requests para evitar rate limiting
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < 3.0:
+            await asyncio.sleep(3.0 - time_since_last)
+        
+        return False
     
     async def search_tweets(self, query, limit=10):
-        """Busca tweets usando API v2 do Twitter - SOLUÇÃO COMPLETA"""
+        """Busca tweets usando API v2 do Twitter - MELHORADO"""
         if not TWITTER_BEARER_TOKEN:
             return []
         
-        current_time = time.time()
-        
-        # Gerenciamento avançado de rate limiting
-        if self.rate_limit_remaining <= 5:
-            if current_time < self.rate_limit_reset:
-                wait_time = self.rate_limit_reset - current_time
-                logger.warning(f"🐦 Rate limit Twitter - Aguardando {wait_time:.0f}s")
-                await asyncio.sleep(wait_time)
-                self.rate_limit_remaining = 450
-            else:
-                self.rate_limit_remaining = 450
-        
-        # Espera estratégica entre requests
-        time_since_last = current_time - self.last_request_time
-        if time_since_last < 2.5:
-            await asyncio.sleep(2.5 - time_since_last)
+        # Verificar rate limit antes de prosseguir
+        if await self.handle_rate_limit():
+            return []
         
         headers = {
             'Authorization': f'Bearer {TWITTER_BEARER_TOKEN}'
@@ -225,7 +250,7 @@ class TwitterAPI:
         url = 'https://api.twitter.com/2/tweets/search/recent'
         params = {
             'query': optimized_query,
-            'max_results': min(limit, 50),
+            'max_results': min(limit, 30),  # Reduzido para evitar rate limiting
             'tweet.fields': 'created_at,public_metrics,author_id,context_annotations',
             'expansions': 'author_id',
             'user.fields': 'username,name,verified',
@@ -238,7 +263,7 @@ class TwitterAPI:
                 url,
                 headers=headers,
                 params=params,
-                timeout=20
+                timeout=25
             ) as response:
                 self.last_request_time = time.time()
                 self.request_count += 1
@@ -247,7 +272,8 @@ class TwitterAPI:
                 if 'x-rate-limit-remaining' in response.headers:
                     self.rate_limit_remaining = int(response.headers['x-rate-limit-remaining'])
                 if 'x-rate-limit-reset' in response.headers:
-                    self.rate_limit_reset = int(response.headers['x-rate-limit-reset'])
+                    reset_time = int(response.headers['x-rate-limit-reset'])
+                    self.rate_limit_reset = reset_time
                 
                 response_time = time.time() - start_time
                 
@@ -258,7 +284,12 @@ class TwitterAPI:
                     return tweets
                 
                 elif response.status == 429:
-                    logger.warning("🐦 Rate limit Twitter - Aguardando próximo ciclo")
+                    # Rate limit excedido - calcular tempo de espera
+                    reset_time = int(response.headers.get('x-rate-limit-reset', time.time() + 900))
+                    wait_time = max(reset_time - time.time(), 60)
+                    self.rate_limit_wait_time = time.time() + wait_time
+                    
+                    logger.warning(f"🐦 Rate limit excedido! Aguardando {wait_time:.0f}s")
                     return []
                 
                 elif response.status == 400:
@@ -291,9 +322,9 @@ class TwitterAPI:
                 author_id = tweet_data.get('author_id')
                 author_info = users.get(author_id, {})
                 
-                # Filtrar tweets com baixo engajamento
+                # Filtrar tweets com baixo engajamento (critério mais relaxado)
                 metrics = tweet_data.get('public_metrics', {})
-                if metrics.get('like_count', 0) + metrics.get('retweet_count', 0) < 3:
+                if metrics.get('like_count', 0) + metrics.get('retweet_count', 0) < 2:
                     continue
                 
                 tweets.append({
@@ -366,10 +397,10 @@ class AlphaHunterBot:
                 new_posts = await self.reddit_api.get_new_posts(subreddit, limit=10)
                 
                 # Buscar por keywords específicas
-                for keyword in random.sample(self.keywords, min(4, len(self.keywords))):
-                    keyword_posts = await self.reddit_api.search_posts(subreddit, keyword, limit=6)
+                for keyword in random.sample(self.keywords, min(3, len(self.keywords))):
+                    keyword_posts = await self.reddit_api.search_posts(subreddit, keyword, limit=5)
                     new_posts.extend(keyword_posts)
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)  # Aumentado para reduzir rate limiting
                 
                 for post in new_posts:
                     post_id = f"reddit_{post.get('id', '')}"
@@ -395,7 +426,7 @@ class AlphaHunterBot:
                         
                         logger.info(f"📝 Reddit: {post['title'][:60]}...")
                 
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(2)  # Aumentado para reduzir rate limiting
                 
             except Exception as e:
                 logger.error(f"❌ Error monitoring Reddit: {e}")
@@ -404,27 +435,27 @@ class AlphaHunterBot:
         return posts
     
     async def monitor_twitter(self):
-        """Monitora Twitter para oportunidades"""
+        """Monitora Twitter para oportunidades - MELHORADO"""
         tweets = []
         
         if not TWITTER_BEARER_TOKEN:
             return tweets
         
-        # Buscar no Twitter a cada 2 ciclos para reduzir rate limiting
+        # Buscar no Twitter a cada 3 ciclos para reduzir rate limiting
         self.twitter_cycle += 1
-        if self.twitter_cycle % 2 != 0:
+        if self.twitter_cycle % 3 != 0:
+            logger.info("🐦 Twitter: Pulando ciclo para reduzir rate limiting")
             return tweets
         
         try:
-            # Grupos de keywords otimizados
+            # Grupos de keywords otimizados (menos frequentes)
             keyword_groups = [
                 "presale OR launch OR token OR airdrop",
-                "whitelist OR ido OR gem OR moonshot",
-                "fair launch OR stealth launch OR new token"
+                "whitelist OR ido OR gem OR moonshot"
             ]
             
             for query in keyword_groups:
-                found_tweets = await self.twitter_api.search_tweets(query, limit=12)
+                found_tweets = await self.twitter_api.search_tweets(query, limit=8)  # Reduzido
                 
                 for tweet in found_tweets:
                     tweet_id = f"twitter_{tweet.get('id', '')}"
@@ -440,7 +471,7 @@ class AlphaHunterBot:
                         if kw.lower() in text:
                             found_keywords.append(kw)
                     
-                    if found_keywords and tweet['likes'] >= 5:
+                    if found_keywords and tweet['likes'] >= 3:  # Critério mais relaxado
                         tweets.append({
                             **tweet,
                             'keywords': found_keywords,
@@ -449,7 +480,7 @@ class AlphaHunterBot:
                         
                         logger.info(f"🐦 Twitter: {tweet['text'][:60]}...")
                 
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)  # Aumentado para reduzir rate limiting
             
         except Exception as e:
             logger.error(f"❌ Error monitoring Twitter: {e}")
@@ -477,7 +508,7 @@ class AlphaHunterBot:
             all_content.sort(key=lambda x: x['relevance_score'], reverse=True)
             
             logger.info(f"📊 Reddit: {len(reddit_posts)}, Twitter: {len(twitter_tweets)}")
-            return all_content[:25]
+            return all_content[:20]  # Reduzido
             
         except Exception as e:
             logger.error(f"❌ Error in monitor_sources: {e}")
@@ -655,7 +686,13 @@ async def main():
     
     bot = AlphaHunterBot()
     try:
-        await bot.run()
+        # Iniciar o bot em background
+        bot_task = asyncio.create_task(bot.run())
+        
+        # Manter a aplicação rodando
+        while True:
+            await asyncio.sleep(3600)  # Sleep por 1 hora
+            
     except KeyboardInterrupt:
         logger.info("🤖 Bot interrompido pelo usuário")
     except Exception as e:
@@ -664,4 +701,13 @@ async def main():
         await bot.close()
 
 if __name__ == "__main__":
+    # Iniciar serv Flask em thread separada para Render
+    import threading
+    def run_flask():
+        app.run(host='0.0.0.0', port=PORT, debug=False)
+    
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Executar o bot principal
     asyncio.run(main())
